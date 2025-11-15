@@ -75,7 +75,7 @@ export function PrescriptionUploader({
       });
 
       // Handle network errors
-      if (!response.ok && response.status === 0) {
+      if (!response.ok && (response.status === 0 || response.status >= 500)) {
         throw new Error("Cannot connect to extraction service. Please make sure the Flask server is running on port 5000.");
       }
 

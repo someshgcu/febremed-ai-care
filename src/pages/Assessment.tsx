@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,6 +12,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { Loader2, ArrowLeft } from "lucide-react";
 import { PrescriptionUploader, MedicationData } from "@/components/PrescriptionUploader";
+import { EmergencyAlert } from "@/components/EmergencyAlert";
+import { checkEmergencySeverity } from "@/utils/emergencyChecker";
 
 const SYMPTOMS = [
   "Body ache",
@@ -45,6 +47,24 @@ const Assessment = () => {
     comorbidities: [] as string[],
   });
   const [prescriptionData, setPrescriptionData] = useState<MedicationData | null>(null);
+  const [emergencyAlert, setEmergencyAlert] = useState<any>(null);
+
+  // Check for emergency conditions whenever form data changes
+  useEffect(() => {
+    if (formData.temperature && formData.age && formData.duration && formData.symptoms.length > 0) {
+      const emergencyData = {
+        temperature: parseFloat(formData.temperature),
+        age: parseInt(formData.age),
+        symptoms: formData.symptoms,
+        comorbidities: formData.comorbidities,
+        duration: parseInt(formData.duration)
+      };
+      const alert = checkEmergencySeverity(emergencyData);
+      setEmergencyAlert(alert);
+    } else {
+      setEmergencyAlert(null);
+    }
+  }, [formData.temperature, formData.age, formData.duration, formData.symptoms, formData.comorbidities]);
 
   const handleSymptomToggle = (symptom: string) => {
     setFormData(prev => ({
@@ -65,10 +85,24 @@ const Assessment = () => {
   };
 
   const handleMedicationExtracted = (data: MedicationData) => {
+    // Map medication type to form values
+    const typeMapping: Record<string, string> = {
+      'Antipyretic': 'antipyretic',
+      'Antibiotic': 'antibiotic', 
+      'Antiviral': 'antiviral',
+      'Other': 'other'
+    };
+    
+    const mappedType = typeMapping[data.medication_type] || 'other';
+    
     setFormData(prev => ({
       ...prev,
-      medicationType: data.medication_type.toLowerCase(),
+      medicationType: mappedType,
       medicationName: data.medication_name ?? "",
+      // Auto-populate days on medication from duration if available
+      daysOnMedication: data.duration_days && Number.isFinite(data.duration_days) 
+        ? String(Math.round(data.duration_days)) 
+        : prev.daysOnMedication
     }));
     setPrescriptionData(data);
     const medName = data.medication_name || 'Medication';
@@ -98,6 +132,15 @@ const Assessment = () => {
     setLoading(true);
 
     try {
+      // Check for emergency conditions first
+      const emergencyData = {
+        temperature: parseFloat(formData.temperature),
+        age: parseInt(formData.age),
+        symptoms: formData.symptoms,
+        comorbidities: formData.comorbidities,
+        duration: parseInt(formData.duration)
+      };
+
       const medicationTypeLabel = formData.medicationType
         ? formData.medicationType.charAt(0).toUpperCase() + formData.medicationType.slice(1)
         : "";
@@ -295,6 +338,11 @@ const Assessment = () => {
                 </div>
               </div>
 
+              {/* Emergency Alert */}
+              {emergencyAlert && emergencyAlert.severity === 'RED' && (
+                <EmergencyAlert alert={emergencyAlert} location={formData.location} />
+              )}
+
               <div className="space-y-6">
                 <div className="p-6 border-2 border-dashed border-blue-200 rounded-lg bg-blue-50/50">
                   <h2 className="text-lg font-semibold mb-2">Option 1: Upload Prescription</h2>
@@ -350,7 +398,7 @@ const Assessment = () => {
                   onValueChange={(value) => setFormData({ ...formData, compliance: value[0] })}
                   min={0}
                   max={100}
-                  step={10}
+                  step={1}
                   className="w-full"
                 />
               </div>

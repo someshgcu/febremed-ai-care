@@ -33,80 +33,58 @@ serve(async (req) => {
 
     console.log('Analyzing patient data:', patientData);
 
-    // Get GEMINI_API_KEY from environment (set as secret in Supabase)
-    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
-    if (!GEMINI_API_KEY) {
-      console.error("GEMINI_API_KEY is not configured. Please set it as a secret in Supabase.");
+    // Get Python API URL from environment (set as secret in Supabase)
+    // For local development, use: http://localhost:5000
+    // For production, use your deployed URL (e.g., https://your-api.onrender.com)
+    const PYTHON_API_URL = Deno.env.get("PYTHON_API_URL") || "http://localhost:5000";
+    
+    if (!PYTHON_API_URL) {
+      console.error("PYTHON_API_URL is not configured. Please set it as a secret in Supabase.");
       return new Response(
         JSON.stringify({ 
           error: "AI service is not configured. Please contact support.",
-          details: "GEMINI_API_KEY secret is missing. Set it in Supabase project settings."
+          details: "PYTHON_API_URL secret is missing. Set it in Supabase project settings."
         }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-  const model = Deno.env.get("GEMINI_MODEL") ?? "models/gemini-flash-latest";
+    console.log(`Calling Python API at: ${PYTHON_API_URL}/api/predict-fever`);
 
-    const prompt = `You are a medical AI assistant helping patients understand fever recovery.
-Analyze the following patient data and provide clinical decision support.
-IMPORTANT: Always recommend consulting a doctor for final decisions.
-Never provide definitive medical advice. Provide evidence-based guidance only.
-
-Respond ONLY with valid JSON (no markdown, no code blocks, no extra text) using this schema:
-{
-  "decision": "CONTINUE" | "CONSULT_DOCTOR" | "LIKELY_SAFE_TO_STOP",
-  "recovery_probability": number,
-  "confidence": number,
-  "explanation": string,
-  "key_factors": string[],
-  "risk_assessment": "LOW" | "MEDIUM" | "HIGH",
-  "next_steps": string[],
-  "warning_signs": string[],
-  "doctor_note": string
-}
-
-Patient Assessment:
-- Age: ${patientData.age} years
-- Temperature: ${patientData.temperature}°C
-- Fever Duration: ${patientData.duration} days
-- Medication: ${patientData.medicationType}
-- Days on medication: ${patientData.daysOnMedication}
-- Compliance: ${patientData.compliance}%
-- Symptoms: ${patientData.symptoms.join(', ')}
-- Comorbidities: ${patientData.comorbidities.join(', ') || 'None'}
-- Location: ${patientData.location}`;
-
-    console.log("Calling Gemini model:", model);
-
+    // Call Python Flask API with XGBoost model
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/${model}:generateContent?key=${GEMINI_API_KEY}`,
+      `${PYTHON_API_URL}/api/predict-fever`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: prompt }],
-            },
-          ],
-          generationConfig: {
-            temperature: 0.3,
-          },
+          patientData: patientData
         }),
       }
     );
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("Gemini API error", response.status, errorText);
+      console.error("Python API error", response.status, errorText);
+
+      if (response.status === 503) {
+        return new Response(
+          JSON.stringify({ 
+            error: "Fever prediction model not available",
+            details: "The XGBoost model is not loaded. Please ensure the model is trained and deployed."
+          }),
+          {
+            status: 503,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          }
+        );
+      }
 
       if (response.status === 429) {
         return new Response(
-          JSON.stringify({ error: "Gemini rate limit exceeded. Please try again shortly." }),
+          JSON.stringify({ error: "API rate limit exceeded. Please try again shortly." }),
           {
             status: 429,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -114,27 +92,17 @@ Patient Assessment:
         );
       }
 
-      throw new Error(`Gemini API error: ${response.status}`);
+      throw new Error(`Python API error: ${response.status} - ${errorText}`);
     }
 
-    const data = await response.json();
-    const candidate = data.candidates?.[0];
-    const rawText = candidate?.content?.parts?.[0]?.text?.trim();
+    const aiAnalysis = await response.json();
 
-    if (!rawText) {
-      console.error("Gemini response missing text", data);
-      throw new Error("Gemini response missing content");
+    if (!aiAnalysis || !aiAnalysis.decision) {
+      console.error("Invalid response from Python API", aiAnalysis);
+      throw new Error("Invalid response from Python API");
     }
 
-    const cleaned = rawText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-
-    let aiAnalysis;
-    try {
-      aiAnalysis = JSON.parse(cleaned);
-    } catch (parseError) {
-      console.error("Gemini JSON parse error", parseError, cleaned);
-      throw new Error("Failed to parse Gemini response as JSON");
-    }
+    console.log(`Prediction received: ${aiAnalysis.decision} (confidence: ${aiAnalysis.confidence})`);
 
     return new Response(JSON.stringify(aiAnalysis), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },

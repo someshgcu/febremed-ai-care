@@ -1,9 +1,12 @@
 import json
 import logging
 import os
+import pickle
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
+import numpy as np
+import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -11,6 +14,7 @@ from PIL import Image
 from google.api_core import exceptions as google_exceptions
 import google.generativeai as genai
 import pytesseract
+import xgboost as xgb
 
 load_dotenv()
 
@@ -59,6 +63,46 @@ if MODEL_NAME == DEFAULT_MODEL:
     logger.info("Using default Gemini model: %s", MODEL_NAME)
 else:
     logger.info("Using custom Gemini model: %s", MODEL_NAME)
+
+# Load XGBoost fever prediction model
+FEVER_MODEL_DIR = Path(__file__).parent / "models"
+FEVER_MODEL_PATH = FEVER_MODEL_DIR / "fever_model.pkl"
+FEVER_FEATURE_NAMES_PATH = FEVER_MODEL_DIR / "feature_names.json"
+FEVER_LABEL_ENCODER_PATH = FEVER_MODEL_DIR / "label_encoder.pkl"
+
+fever_model: Optional[xgb.XGBClassifier] = None
+fever_label_encoder: Optional[Any] = None
+fever_feature_names: Optional[list] = None
+
+def load_fever_model():
+    """Load XGBoost fever prediction model on startup."""
+    global fever_model, fever_label_encoder, fever_feature_names
+    
+    try:
+        if not FEVER_MODEL_PATH.exists():
+            logger.warning(f"Fever model not found at {FEVER_MODEL_PATH}. Run train_fever_model.py first.")
+            return
+        
+        logger.info(f"Loading fever prediction model from {FEVER_MODEL_PATH}...")
+        
+        with open(FEVER_MODEL_PATH, 'rb') as f:
+            fever_model = pickle.load(f)
+        
+        with open(FEVER_LABEL_ENCODER_PATH, 'rb') as f:
+            fever_label_encoder = pickle.load(f)
+        
+        with open(FEVER_FEATURE_NAMES_PATH, 'r') as f:
+            fever_feature_names = json.load(f)
+        
+        logger.info("✅ Fever prediction model loaded successfully!")
+        logger.info(f"   Features: {fever_feature_names}")
+        logger.info(f"   Classes: {fever_label_encoder.classes_.tolist()}")
+    except Exception as e:
+        logger.error(f"Failed to load fever model: {e}", exc_info=True)
+        logger.warning("Fever prediction endpoint will not be available until model is loaded.")
+
+# Load model on startup
+load_fever_model()
 
 
 def _build_gemini_prompt(extracted_text: str) -> str:
@@ -187,9 +231,285 @@ def extract_medication():
         return jsonify({"error": str(exc)}), 500
 
 
+def _normalize_patient_data(patient_data: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Normalize patient data from frontend format to model feature format.
+    
+    Frontend format:
+    - temperature, age, duration, compliance, symptoms (array), comorbidities (array)
+    
+    Model format:
+    - Temperature, Age, BMI, Fever_Duration, Compliance_Rate, Headache, Body_Ache, Fatigue, Chronic_Conditions
+    """
+    # Extract base features
+    temperature = float(patient_data.get("temperature", patient_data.get("Temperature", 37.0)))
+    age = float(patient_data.get("age", patient_data.get("Age", 30)))
+    fever_duration = float(patient_data.get("duration", patient_data.get("Fever_Duration", patient_data.get("fever_duration", 3))))
+    compliance_rate = float(patient_data.get("compliance", patient_data.get("Compliance_Rate", patient_data.get("compliance_rate", 80))))
+    
+    # BMI: use provided BMI or estimate from age (simple heuristic)
+    bmi = patient_data.get("BMI", patient_data.get("bmi"))
+    if bmi is None:
+        # Simple BMI estimation (not medically accurate, but reasonable default)
+        bmi = 22.0 + (age - 30) * 0.1  # Rough estimate
+    bmi = float(bmi)
+    
+    # Symptoms: convert array to binary flags
+    symptoms = patient_data.get("symptoms", [])
+    if isinstance(symptoms, list):
+        symptoms_lower = [s.lower() if isinstance(s, str) else str(s).lower() for s in symptoms]
+        headache = 1 if any("headache" in s for s in symptoms_lower) else patient_data.get("Headache", 0)
+        body_ache = 1 if any("body" in s or "ache" in s or "pain" in s for s in symptoms_lower) else patient_data.get("Body_Ache", 0)
+        fatigue = 1 if any("fatigue" in s or "tired" in s or "weak" in s for s in symptoms_lower) else patient_data.get("Fatigue", 0)
+    else:
+        headache = int(patient_data.get("Headache", 0))
+        body_ache = int(patient_data.get("Body_Ache", 0))
+        fatigue = int(patient_data.get("Fatigue", 0))
+    
+    # Chronic conditions
+    comorbidities = patient_data.get("comorbidities", [])
+    chronic_conditions = 1 if (isinstance(comorbidities, list) and len(comorbidities) > 0) else int(patient_data.get("Chronic_Conditions", 0))
+    
+    return {
+        "Temperature": temperature,
+        "Age": age,
+        "BMI": bmi,
+        "Fever_Duration": fever_duration,
+        "Compliance_Rate": compliance_rate,
+        "Headache": int(headache),
+        "Body_Ache": int(body_ache),
+        "Fatigue": int(fatigue),
+        "Chronic_Conditions": int(chronic_conditions)
+    }
+
+
+@app.route("/api/predict-fever", methods=["POST"])
+def predict_fever():
+    """
+    Predict fever recovery decision using XGBoost model.
+    
+    Expected input format:
+    {
+        "patientData": {
+            "temperature": 38.5,
+            "age": 30,
+            "duration": 3,
+            "compliance": 85,
+            "symptoms": ["Headache", "Body ache"],
+            "comorbidities": [],
+            ...
+        }
+    }
+    
+    Or direct format (for testing):
+    {
+        "Temperature": 38.5,
+        "Age": 30,
+        "BMI": 24.0,
+        "Fever_Duration": 3,
+        "Compliance_Rate": 85,
+        "Headache": 1,
+        "Body_Ache": 1,
+        "Fatigue": 0,
+        "Chronic_Conditions": 0
+    }
+    """
+    if request.method != "POST":
+        return jsonify({"error": "Method not allowed"}), 405
+    
+    if fever_model is None or fever_label_encoder is None or fever_feature_names is None:
+        return jsonify({
+            "error": "Fever prediction model not loaded",
+            "details": "Run train_fever_model.py to train and save the model first."
+        }), 503
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Request body is required"}), 400
+        
+        # Handle both formats: nested patientData or direct format
+        if "patientData" in data:
+            patient_data = data["patientData"]
+        else:
+            patient_data = data
+        
+        # Normalize to model format
+        normalized_data = _normalize_patient_data(patient_data)
+        
+        logger.info(f"Predicting with features: {normalized_data}")
+        
+        # Create DataFrame with correct feature order
+        feature_df = pd.DataFrame([normalized_data], columns=fever_feature_names)
+        
+        # Predict
+        prediction_encoded = fever_model.predict(feature_df)[0]
+        prediction = fever_label_encoder.inverse_transform([prediction_encoded])[0]
+        
+        # Get probabilities
+        probabilities = fever_model.predict_proba(feature_df)[0]
+        prob_dict = {
+            label: float(prob) 
+            for label, prob in zip(fever_label_encoder.classes_, probabilities)
+        }
+        
+        # Get confidence (max probability)
+        confidence = float(max(probabilities))
+        
+        # Calculate recovery probability based on decision
+        # For LIKELY_SAFE_TO_STOP: use that probability
+        # For CONTINUE: use probability of LIKELY_SAFE_TO_STOP (recovery potential)
+        # For CONSULT_DOCTOR: use complement of CONSULT_DOCTOR probability (1 - consult_prob)
+        if prediction == "LIKELY_SAFE_TO_STOP":
+            recovery_probability = float(prob_dict.get("LIKELY_SAFE_TO_STOP", 0.0))
+        elif prediction == "CONTINUE":
+            # Recovery potential = probability of safe to stop
+            recovery_probability = float(prob_dict.get("LIKELY_SAFE_TO_STOP", 0.0))
+        else:  # CONSULT_DOCTOR
+            # Recovery probability = 1 - probability of consulting doctor
+            # This shows the chance of NOT needing to consult (i.e., recovery potential)
+            consult_prob = float(prob_dict.get("CONSULT_DOCTOR", 0.0))
+            recovery_probability = 1.0 - consult_prob
+        
+        # Determine risk assessment based on prediction and features
+        risk_assessment = "MEDIUM"
+        if prediction == "CONSULT_DOCTOR":
+            risk_assessment = "HIGH"
+        elif prediction == "LIKELY_SAFE_TO_STOP":
+            risk_assessment = "LOW"
+        
+        # Generate explanation
+        explanation = _generate_explanation(prediction, normalized_data, prob_dict, confidence)
+        
+        # Build response
+        response = {
+            "decision": prediction,
+            "recovery_probability": recovery_probability,
+            "confidence": confidence,
+            "explanation": explanation,
+            "key_factors": _get_key_factors(normalized_data, prediction),
+            "risk_assessment": risk_assessment,
+            "next_steps": _get_next_steps(prediction),
+            "warning_signs": _get_warning_signs(normalized_data),
+            "doctor_note": "This is an AI-assisted prediction. Always consult a healthcare professional for medical decisions.",
+            "probabilities": prob_dict,
+            "input_features": normalized_data
+        }
+        
+        logger.info(f"Prediction: {prediction} (confidence: {confidence:.2%})")
+        
+        return jsonify(response), 200
+        
+    except KeyError as e:
+        logger.exception("Missing required field in request")
+        return jsonify({"error": f"Missing required field: {e}"}), 400
+    except ValueError as e:
+        logger.exception("Invalid input data")
+        return jsonify({"error": f"Invalid input: {e}"}), 400
+    except Exception as e:
+        logger.exception("Unexpected error during prediction")
+        return jsonify({"error": str(e)}), 500
+
+
+def _generate_explanation(prediction: str, features: Dict[str, float], probabilities: Dict[str, float], confidence: float) -> str:
+    """Generate human-readable explanation for the prediction."""
+    temp = features["Temperature"]
+    duration = features["Fever_Duration"]
+    compliance = features["Compliance_Rate"]
+    
+    if prediction == "CONTINUE":
+        return f"Based on your temperature of {temp}°C, {duration} days of fever, and {compliance}% medication compliance, it's recommended to continue your current treatment. Monitor symptoms closely."
+    elif prediction == "CONSULT_DOCTOR":
+        return f"Given your temperature of {temp}°C, {duration} days of fever, and {compliance}% compliance, it's advisable to consult a healthcare professional for further evaluation."
+    else:  # LIKELY_SAFE_TO_STOP
+        return f"With a temperature of {temp}°C, {duration} days of fever, and {compliance}% compliance, it may be safe to consider stopping medication. However, always consult your doctor before making changes."
+
+
+def _get_key_factors(features: Dict[str, float], prediction: str) -> list:
+    """Extract key factors influencing the decision."""
+    factors = []
+    
+    temp = features["Temperature"]
+    if temp > 38.5:
+        factors.append(f"Elevated temperature ({temp}°C)")
+    elif temp < 37.5:
+        factors.append(f"Normal temperature ({temp}°C)")
+    
+    duration = features["Fever_Duration"]
+    if duration > 7:
+        factors.append(f"Prolonged fever duration ({duration} days)")
+    
+    compliance = features["Compliance_Rate"]
+    if compliance < 60:
+        factors.append(f"Low medication compliance ({compliance}%)")
+    elif compliance > 90:
+        factors.append(f"Excellent medication compliance ({compliance}%)")
+    
+    if features["Chronic_Conditions"]:
+        factors.append("Presence of chronic conditions")
+    
+    symptom_count = features["Headache"] + features["Body_Ache"] + features["Fatigue"]
+    if symptom_count > 2:
+        factors.append(f"Multiple symptoms present ({symptom_count})")
+    
+    return factors if factors else ["Standard recovery parameters"]
+
+
+def _get_next_steps(prediction: str) -> list:
+    """Get recommended next steps based on prediction."""
+    if prediction == "CONTINUE":
+        return [
+            "Continue taking medication as prescribed",
+            "Monitor temperature twice daily",
+            "Maintain good hydration",
+            "Get adequate rest",
+            "Contact doctor if symptoms worsen"
+        ]
+    elif prediction == "CONSULT_DOCTOR":
+        return [
+            "Schedule an appointment with your healthcare provider",
+            "Continue medication until doctor's visit",
+            "Monitor symptoms closely",
+            "Seek immediate care if symptoms worsen",
+            "Prepare a list of symptoms and medication history"
+        ]
+    else:  # LIKELY_SAFE_TO_STOP
+        return [
+            "Consult your doctor before stopping medication",
+            "Gradually reduce medication if approved by doctor",
+            "Continue monitoring temperature",
+            "Watch for symptom recurrence",
+            "Maintain healthy lifestyle habits"
+        ]
+
+
+def _get_warning_signs(features: Dict[str, float]) -> list:
+    """Get warning signs to watch for."""
+    warnings = []
+    
+    if features["Temperature"] > 39.0:
+        warnings.append("High fever (>39°C) - seek medical attention if persistent")
+    
+    if features["Fever_Duration"] > 7:
+        warnings.append("Fever lasting more than 7 days - consult doctor")
+    
+    if features["Compliance_Rate"] < 60:
+        warnings.append("Low medication compliance may affect recovery")
+    
+    if features["Chronic_Conditions"]:
+        warnings.append("Chronic conditions may complicate recovery - monitor closely")
+    
+    return warnings if warnings else ["Monitor for any new or worsening symptoms"]
+
+
 @app.get("/api/health")
 def health_check():
-    return jsonify({"status": "healthy"}), 200
+    """Health check endpoint."""
+    status = {
+        "status": "healthy",
+        "fever_model_loaded": fever_model is not None
+    }
+    return jsonify(status), 200
 
 
 if __name__ == "__main__":

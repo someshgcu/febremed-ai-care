@@ -7,6 +7,8 @@ import { Badge } from "@/components/ui/badge";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { Loader2, ArrowLeft, FileText, Activity, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { EmergencyAlert } from "@/components/EmergencyAlert";
+import { checkEmergencySeverity } from "@/utils/emergencyChecker";
 
 const Results = () => {
   const { id } = useParams();
@@ -113,6 +115,19 @@ const Results = () => {
             Generate Doctor Report
           </Button>
         </div>
+
+        {/* Emergency Alert */}
+        {(() => {
+          const emergencyData = {
+            temperature: assessment.temperature,
+            age: assessment.age,
+            symptoms: symptoms.map(s => s.symptom_name),
+            comorbidities: assessment.comorbidities || [],
+            duration: assessment.duration_days
+          };
+          const alert = checkEmergencySeverity(emergencyData);
+          return <EmergencyAlert alert={alert} location={assessment.location} />;
+        })()}
 
         {/* Decision Card */}
         <Card className={getDecisionColor(assessment.decision)}>
@@ -247,7 +262,7 @@ const Results = () => {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Activity className="h-5 w-5 text-primary" />
-              Recommended Microlabs Products
+              Recommended Medicines
             </CardTitle>
             <CardDescription>
               Based on your assessment, here are some products that may help
