@@ -242,6 +242,88 @@ const Results = () => {
           </Card>
         )}
 
+        {/* Product Recommendations */}
+        <Card className="border-primary">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Activity className="h-5 w-5 text-primary" />
+              Recommended Microlabs Products
+            </CardTitle>
+            <CardDescription>
+              Based on your assessment, here are some products that may help
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid md:grid-cols-2 gap-4">
+              {assessment.medication_type?.toLowerCase() === 'antipyretic' && (
+                <>
+                  <div className="p-4 rounded-lg border bg-secondary/30">
+                    <h4 className="font-semibold mb-2">Paracetamol 500mg</h4>
+                    <p className="text-sm text-muted-foreground mb-2">
+                      Effective fever reducer and pain reliever. Suitable for most age groups.
+                    </p>
+                    <Badge variant="outline" className="text-xs">Antipyretic</Badge>
+                  </div>
+                  <div className="p-4 rounded-lg border bg-secondary/30">
+                    <h4 className="font-semibold mb-2">Ibuprofen 400mg</h4>
+                    <p className="text-sm text-muted-foreground mb-2">
+                      Anti-inflammatory and fever reducer. Use with caution if you have stomach issues.
+                    </p>
+                    <Badge variant="outline" className="text-xs">Antipyretic</Badge>
+                  </div>
+                </>
+              )}
+              {assessment.medication_type?.toLowerCase() === 'antibiotic' && (
+                <>
+                  <div className="p-4 rounded-lg border bg-secondary/30">
+                    <h4 className="font-semibold mb-2">Azithromycin 500mg</h4>
+                    <p className="text-sm text-muted-foreground mb-2">
+                      Broad-spectrum antibiotic. Complete the full course as prescribed.
+                    </p>
+                    <Badge variant="outline" className="text-xs">Antibiotic</Badge>
+                  </div>
+                  <div className="p-4 rounded-lg border bg-secondary/30">
+                    <h4 className="font-semibold mb-2">Amoxicillin 500mg</h4>
+                    <p className="text-sm text-muted-foreground mb-2">
+                      Common antibiotic for bacterial infections. Take with food to reduce stomach upset.
+                    </p>
+                    <Badge variant="outline" className="text-xs">Antibiotic</Badge>
+                  </div>
+                </>
+              )}
+              {assessment.medication_type?.toLowerCase() === 'antiviral' && (
+                <>
+                  <div className="p-4 rounded-lg border bg-secondary/30">
+                    <h4 className="font-semibold mb-2">Oseltamivir 75mg</h4>
+                    <p className="text-sm text-muted-foreground mb-2">
+                      Antiviral medication for influenza. Most effective when started early.
+                    </p>
+                    <Badge variant="outline" className="text-xs">Antiviral</Badge>
+                  </div>
+                </>
+              )}
+              <div className="p-4 rounded-lg border bg-secondary/30">
+                <h4 className="font-semibold mb-2">Oral Rehydration Salts (ORS)</h4>
+                <p className="text-sm text-muted-foreground mb-2">
+                  Essential for maintaining hydration during fever. Mix with clean water as directed.
+                </p>
+                <Badge variant="outline" className="text-xs">Supportive Care</Badge>
+              </div>
+              <div className="p-4 rounded-lg border bg-secondary/30">
+                <h4 className="font-semibold mb-2">Multivitamin Supplements</h4>
+                <p className="text-sm text-muted-foreground mb-2">
+                  Support immune system recovery. Contains Vitamin C, Zinc, and other essential nutrients.
+                </p>
+                <Badge variant="outline" className="text-xs">Supportive Care</Badge>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground mt-4 text-center">
+              <strong>Note:</strong> Always consult with a healthcare professional before starting any new medication. 
+              These recommendations are for informational purposes only.
+            </p>
+          </CardContent>
+        </Card>
+
         {/* Action Buttons */}
         <div className="flex flex-col sm:flex-row gap-4 pt-4">
           <Button onClick={() => navigate('/assessment')} size="lg" className="flex-1">

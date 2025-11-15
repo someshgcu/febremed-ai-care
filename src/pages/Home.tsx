@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { useNavigate } from "react-router-dom";
-import { Activity, History } from "lucide-react";
+import { Activity, History, MapPin, Heart } from "lucide-react";
 import UserMenu from "@/components/UserMenu";
 
 const Home = () => {
@@ -42,6 +42,29 @@ const Home = () => {
           >
             <History className="mr-2 h-5 w-5" />
             View My History
+          </Button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-8 max-w-2xl mx-auto">
+          <Button
+            variant="outline"
+            size="lg"
+            className="w-full h-auto py-6 flex flex-col items-center gap-2"
+            onClick={() => navigate('/healthcare')}
+          >
+            <MapPin className="h-6 w-6 text-primary" />
+            <span className="font-semibold">Find Healthcare</span>
+            <span className="text-xs text-muted-foreground">Locate nearby hospitals & pharmacies</span>
+          </Button>
+          <Button
+            variant="outline"
+            size="lg"
+            className="w-full h-auto py-6 flex flex-col items-center gap-2"
+            onClick={() => navigate('/caregiver-tips')}
+          >
+            <Heart className="h-6 w-6 text-primary" />
+            <span className="font-semibold">Caregiver Tips</span>
+            <span className="text-xs text-muted-foreground">Essential care guidance & red flags</span>
           </Button>
         </div>
 
